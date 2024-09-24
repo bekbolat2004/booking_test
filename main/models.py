@@ -7,7 +7,7 @@ from django.utils import timezone
 
 class Resource(models.Model):
     name = models.CharField(max_length=100)
-    max_slots = models.IntegerField()
+    max_duration = models.IntegerField(default=4)
 
     def __str__(self):
         return self.name
