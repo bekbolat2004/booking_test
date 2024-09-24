@@ -9,6 +9,9 @@ from django.db.models import Q
 from .models import Booking, Resource, Queue
 from .serializers import BookingSerializer, ResourceSerializer
 from django.utils import timezone
+from datetime import timedelta
+import dateutil.parser
+
 
 class BookingViewSet(viewsets.ModelViewSet):
     queryset = Booking.objects.all()
@@ -18,14 +21,33 @@ class BookingViewSet(viewsets.ModelViewSet):
         # Получаем данные бронирования
         user = request.user
         resource_id = request.data.get('resource')
-        start_time = request.data.get('start_time')
-        end_time = request.data.get('end_time')
+        start_time_str = request.data.get('start_time')
+        end_time_str = request.data.get('end_time')
 
-        if not start_time or not end_time:
+        if not start_time_str or not end_time_str:
             return Response({'detail': 'Start time and end time are required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        start_time = timezone.datetime.fromisoformat(start_time)
-        end_time = timezone.datetime.fromisoformat(end_time)
+        try:
+            start_time = dateutil.parser.isoparse(start_time_str)
+            end_time = dateutil.parser.isoparse(end_time_str)
+
+            # Если даты naive, сделаем их aware с временной зоной по умолчанию (обычно UTC)
+            if timezone.is_naive(start_time):
+                start_time = timezone.make_aware(start_time)
+            if timezone.is_naive(end_time):
+                end_time = timezone.make_aware(end_time)
+        except (ValueError, OverflowError) as e:
+            return Response({'detail': 'Invalid datetime format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Проверка, что бронирование начинается в будущем
+        now = timezone.now()
+        if start_time <= now:
+            return Response({'detail': 'Booking start time must be in the future.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Проверка, что конец бронирования наступает после начала
+        if end_time <= start_time:
+            return Response({'detail': 'Booking end time must be after the start time.'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         # Проверка максимальной длительности бронирования для ресурса
         resource = Resource.objects.get(id=resource_id)
@@ -37,6 +59,13 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {'detail': f'Booking duration exceeds the maximum allowed duration of {resource.max_duration} hours.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        if self.has_recent_booking(user, resource_id):
+            return Response(
+                {'detail': 'You can only book this resource once in a 24-hour period.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # Проверяем наличие пересечений бронирований
         if self.is_slot_available(resource_id, start_time, end_time):
             # Создание бронирования
@@ -69,6 +98,21 @@ class BookingViewSet(viewsets.ModelViewSet):
             Q(status='active')
         )
         return not overlapping_bookings.exists()
+
+    def has_recent_booking(self, user, resource_id):
+        # Время 24 часа назад от текущего момента
+        now = timezone.now()
+        twenty_four_hours_ago = now - timedelta(hours=24)
+
+        # Проверяем бронирования для данного ресурса за последние 24 часа
+        recent_booking = Booking.objects.filter(
+            user=user,
+            resource_id=resource_id,
+            start_time__gte=twenty_four_hours_ago,
+            status__in=['active', 'completed']  # Активные и завершенные бронирования
+        )
+
+        return recent_booking.exists()
 
     def destroy(self, request, *args, **kwargs):
         booking = self.get_object()
